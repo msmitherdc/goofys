@@ -82,7 +82,7 @@ func NewApp() (app *cli.App) {
 
 	app = &cli.App{
 		Name:     "goofys",
-		Version:  "0.0.18-" + VersionHash,
+		Version:  "0.19.0-" + VersionHash,
 		Usage:    "Mount an S3 bucket locally",
 		HideHelp: true,
 		Writer:   os.Stderr,
@@ -416,7 +416,7 @@ func PopulateFlags(c *cli.Context) (ret *FlagStorage) {
 			flags.MountPoint = flags.MountPointCreated
 		}
 
-		cacheArgs = append([]string{"--test"}, cacheArgs...)
+		cacheArgs = append([]string{"--test", "-f"}, cacheArgs...)
 
 		if flags.MountPointArg == flags.MountPoint {
 			cacheArgs = append(cacheArgs, "-ononempty")

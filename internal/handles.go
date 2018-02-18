@@ -93,12 +93,17 @@ func (inode *Inode) touch() {
 }
 
 func (inode *Inode) InflateAttributes() (attr fuseops.InodeAttributes) {
+	mtime := inode.Attributes.Mtime
+	if mtime.IsZero() {
+		mtime = inode.fs.rootAttrs.Mtime
+	}
+
 	attr = fuseops.InodeAttributes{
 		Size:   inode.Attributes.Size,
-		Atime:  inode.Attributes.Mtime,
-		Mtime:  inode.Attributes.Mtime,
-		Ctime:  inode.Attributes.Mtime,
-		Crtime: inode.Attributes.Mtime,
+		Atime:  mtime,
+		Mtime:  mtime,
+		Ctime:  mtime,
+		Crtime: mtime,
 		Uid:    inode.fs.flags.Uid,
 		Gid:    inode.fs.flags.Gid,
 	}
@@ -124,7 +129,10 @@ func (inode *Inode) errFuse(op string, args ...interface{}) {
 }
 
 func (inode *Inode) ToDir() {
-	inode.Attributes = inode.fs.rootAttrs
+	inode.Attributes = InodeAttributes{
+		Size: 4096,
+		// Mtime intentionally not initialized
+	}
 	inode.dir = &DirInodeData{}
 	inode.KnownSize = &inode.fs.rootAttrs.Size
 }
@@ -336,7 +344,6 @@ func (parent *Inode) Create(
 
 	fh = NewFileHandle(inode)
 	fh.poolHandle = fs.bufferPool
-	fh.buf = MBuf{}.Init(fh.poolHandle, 0, true)
 	fh.dirty = true
 	inode.fileHandles = 1
 
@@ -378,7 +385,9 @@ func (parent *Inode) MkDir(
 	inode = NewInode(fs, parent, &name, &fullName)
 	inode.ToDir()
 	inode.touch()
-	parent.Attributes.Mtime = inode.Attributes.Mtime
+	if parent.Attributes.Mtime.Before(inode.Attributes.Mtime) {
+		parent.Attributes.Mtime = inode.Attributes.Mtime
+	}
 
 	return
 }
@@ -872,15 +881,20 @@ func copyObjectMaybeMultipart(fs *Goofys, size int64, from string, to string, sr
 
 	from = fs.bucket + "/" + *fs.key(from)
 
-	if size > 5*1024*1024*1024 {
+	if !fs.gcs && size > 5*1024*1024*1024 {
 		return copyObjectMultipart(fs, size, from, to, "", srcEtag, metadata)
+	}
+
+	storageClass := fs.flags.StorageClass
+	if size < 128*1024 && storageClass == "STANDARD_IA" {
+		storageClass = "STANDARD"
 	}
 
 	params := &s3.CopyObjectInput{
 		Bucket:            &fs.bucket,
 		CopySource:        aws.String(pathEscape(from)),
 		Key:               fs.key(to),
-		StorageClass:      &fs.flags.StorageClass,
+		StorageClass:      &storageClass,
 		ContentType:       fs.getMimeType(to),
 		Metadata:          metadata,
 		MetadataDirective: aws.String(s3.MetadataDirectiveReplace),
@@ -934,14 +948,18 @@ func (parent *Inode) addDotAndDotDot() {
 	en := &DirHandleEntry{
 		Name:       aws.String("."),
 		Type:       fuseutil.DT_Directory,
-		Attributes: &fs.rootAttrs,
+		Attributes: &parent.Attributes,
 		Offset:     1,
 	}
 	fs.insertInodeFromDirEntry(parent, en)
+	dotDotAttr := &parent.Attributes
+	if parent.Parent != nil {
+		dotDotAttr = &parent.Parent.Attributes
+	}
 	en = &DirHandleEntry{
 		Name:       aws.String(".."),
 		Type:       fuseutil.DT_Directory,
-		Attributes: &fs.rootAttrs,
+		Attributes: dotDotAttr,
 		Offset:     2,
 	}
 	fs.insertInodeFromDirEntry(parent, en)
@@ -1000,7 +1018,11 @@ func (parent *Inode) insertSubTree(path string, obj *s3.Object, dirs map[*Inode]
 func (parent *Inode) findChildMaxTime() time.Time {
 	maxTime := parent.Attributes.Mtime
 
-	for _, c := range parent.dir.Children {
+	for i, c := range parent.dir.Children {
+		if i < 2 {
+			// skip . and ..
+			continue
+		}
 		if c.Attributes.Mtime.After(maxTime) {
 			maxTime = c.Attributes.Mtime
 		}

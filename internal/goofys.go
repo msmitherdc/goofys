@@ -15,6 +15,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"mime"
@@ -26,8 +27,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -66,6 +65,7 @@ type Goofys struct {
 	sess      *session.Session
 	s3        *s3.S3
 	v2Signer  bool
+	gcs       bool
 	sseType   string
 	rootAttrs InodeAttributes
 
@@ -127,6 +127,10 @@ func NewGoofys(ctx context.Context, bucket string, awsConfig *aws.Config, flags 
 	if flags.DebugS3 {
 		awsConfig.LogLevel = aws.LogLevel(aws.LogDebug | aws.LogDebugWithRequestErrors)
 		s3Log.Level = logrus.DebugLevel
+	}
+
+	if strings.HasSuffix(flags.Endpoint, "/storage.googleapis.com") {
+		fs.gcs = true
 	}
 
 	fs.awsConfig = awsConfig
@@ -196,6 +200,7 @@ func NewGoofys(ctx context.Context, bucket string, awsConfig *aws.Config, flags 
 	root := NewInode(fs, nil, aws.String(""), aws.String(""))
 	root.Id = fuseops.RootInodeID
 	root.ToDir()
+	root.Attributes.Mtime = fs.rootAttrs.Mtime
 
 	fs.inodes[fuseops.RootInodeID] = root
 
@@ -207,7 +212,6 @@ func NewGoofys(ctx context.Context, bucket string, awsConfig *aws.Config, flags 
 	fs.replicators = Ticket{Total: 16}.Init()
 	fs.restorers = Ticket{Total: 8}.Init()
 
-	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 1000
 	return fs
 }
 
@@ -668,6 +672,9 @@ func (fs *Goofys) LookUpInode(
 			}
 			parent.mu.Unlock()
 		} else {
+			if newInode.Attributes.Mtime.IsZero() {
+				newInode.Attributes.Mtime = inode.Attributes.Mtime
+			}
 			inode.Attributes = newInode.Attributes
 			inode.AttrTime = time.Now()
 		}
@@ -1110,7 +1117,7 @@ func (fs *Goofys) Rename(
 			// flushed it yet, pretend that's ok because
 			// when we flush we will handle the rename
 			inode := parent.findChildUnlocked(op.OldName, false)
-			if inode.fileHandles != 0 {
+			if inode != nil && inode.fileHandles != 0 {
 				err = nil
 			}
 		}

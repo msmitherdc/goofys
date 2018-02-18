@@ -133,6 +133,14 @@ func selectTestConfig(t *C) *aws.Config {
 			//LogLevel:         aws.LogLevel(aws.LogDebug | aws.LogDebugWithSigning),
 			S3ForcePathStyle: aws.Bool(true),
 		}
+	} else if hasEnv("GCS") {
+		return &aws.Config{
+			Region:      aws.String("us-west1"),
+			Endpoint:    aws.String("http://storage.googleapis.com"),
+			Credentials: credentials.NewSharedCredentials("", os.Getenv("GCS")),
+			//LogLevel:         aws.LogLevel(aws.LogDebug | aws.LogDebugWithSigning),
+			S3ForcePathStyle: aws.Bool(true),
+		}
 	} else if hasEnv("MINIO") {
 		return &aws.Config{
 			Credentials: credentials.NewStaticCredentials("Q3AM3UQ867SPQQA43P2F",
@@ -170,19 +178,38 @@ func (s *GoofysTest) deleteBucket(t *C) {
 	resp, err := s.s3.ListObjects(&s3.ListObjectsInput{Bucket: &s.fs.bucket})
 	t.Assert(err, IsNil)
 
-	num_objs := len(resp.Contents)
+	if hasEnv("GCS") {
+		// GCS does not have multi-delete
+		var wg sync.WaitGroup
 
-	var items s3.Delete
-	var objs = make([]*s3.ObjectIdentifier, num_objs)
+		for _, o := range resp.Contents {
+			wg.Add(1)
+			key := *o.Key
+			go func() {
+				_, err = s.s3.DeleteObject(&s3.DeleteObjectInput{
+					Bucket: &s.fs.bucket,
+					Key:    &key,
+				})
+				wg.Done()
+				t.Assert(err, IsNil)
+			}()
+		}
+		wg.Wait()
+	} else {
+		num_objs := len(resp.Contents)
 
-	for i, o := range resp.Contents {
-		objs[i] = &s3.ObjectIdentifier{Key: aws.String(*o.Key)}
+		var items s3.Delete
+		var objs = make([]*s3.ObjectIdentifier, num_objs)
+
+		for i, o := range resp.Contents {
+			objs[i] = &s3.ObjectIdentifier{Key: aws.String(*o.Key)}
+		}
+
+		// Add list of objects to delete to Delete object
+		items.SetObjects(objs)
+		_, err = s.s3.DeleteObjects(&s3.DeleteObjectsInput{Bucket: &s.fs.bucket, Delete: &items})
+		t.Assert(err, IsNil)
 	}
-
-	// Add list of objects to delete to Delete object
-	items.SetObjects(objs)
-	_, err = s.s3.DeleteObjects(&s3.DeleteObjectsInput{Bucket: &s.fs.bucket, Delete: &items})
-	t.Assert(err, IsNil)
 
 	s.s3.DeleteBucket(&s3.DeleteBucketInput{Bucket: &s.fs.bucket})
 }
@@ -278,6 +305,9 @@ func (s *GoofysTest) SetUpTest(t *C) {
 		FileMode:     0700,
 		Uid:          uint32(uid),
 		Gid:          uint32(gid),
+	}
+	if hasEnv("GCS") {
+		flags.Endpoint = "http://storage.googleapis.com"
 	}
 	s.fs = NewGoofys(context.Background(), bucket, s.awsConfig, flags)
 	t.Assert(s.fs, NotNil)
@@ -872,10 +902,12 @@ func (s *GoofysTest) TestRename(t *C) {
 	err = root.Rename(from, root, to)
 	t.Assert(err, Equals, fuse.ENOENT)
 
-	// not really rename but can be used by rename
-	from, to = s.fs.bucket+"/file2", "new_file"
-	err = copyObjectMultipart(s.fs, int64(len("file2")), from, to, "", nil, nil)
-	t.Assert(err, IsNil)
+	if !hasEnv("GCS") {
+		// not really rename but can be used by rename
+		from, to = s.fs.bucket+"/file2", "new_file"
+		err = copyObjectMultipart(s.fs, int64(len("file2")), from, to, "", nil, nil)
+		t.Assert(err, IsNil)
+	}
 }
 
 func (s *GoofysTest) TestConcurrentRefDeref(t *C) {
@@ -915,14 +947,9 @@ func (s *GoofysTest) TestConcurrentRefDeref(t *C) {
 }
 
 func hasEnv(env string) bool {
-	prefix := env + "="
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, prefix+"1") || strings.HasPrefix(e, prefix+"true") {
-			return true
-		}
-	}
+	v := os.Getenv(env)
 
-	return false
+	return !(v == "" || v == "0" || v == "false")
 }
 
 func isTravis() bool {
@@ -1220,6 +1247,8 @@ func (s *GoofysTest) TestPutMimeType(t *C) {
 	t.Assert(err, IsNil)
 	if hasEnv("AWS") {
 		t.Assert(*resp.ContentType, Equals, "binary/octet-stream")
+	} else if hasEnv("GCS") {
+		t.Assert(*resp.ContentType, Equals, "application/octet-stream")
 	} else {
 		// workaround s3proxy https://github.com/andrewgaul/s3proxy/issues/179
 		t.Assert(*resp.ContentType, Equals, "application/unknown")
@@ -2034,25 +2063,33 @@ func (s *GoofysTest) TestRmdirWithDiropen(t *C) {
 func (s *GoofysTest) TestDirMTime(t *C) {
 	s.fs.flags.StatCacheTTL = 1 * time.Minute
 	s.fs.flags.TypeCacheTTL = 1 * time.Minute
+	// enable cheap to ensure GET dir/ will come back before LIST dir/
+	s.fs.flags.Cheap = true
 
 	root := s.getRoot(t)
+	t.Assert(time.Time{}.Before(root.Attributes.Mtime), Equals, true)
 
 	dir1, err := s.LookUpInode(t, "dir1")
 	t.Assert(err, IsNil)
 
-	time.Sleep(time.Second)
+	attr1, _ := dir1.GetAttributes()
+	m1 := attr1.Mtime
+	// dir1 doesn't have a dir blob, so should take root's mtime
+	t.Assert(m1, Equals, root.Attributes.Mtime)
 
-	m1 := dir1.Attributes.Mtime
+	time.Sleep(2 * time.Second)
 
 	dir2, err := dir1.MkDir("dir2")
 	t.Assert(err, IsNil)
 
-	m2 := dir2.Attributes.Mtime
-	t.Assert(m1.Before(m2), Equals, true)
-	t.Assert(root.Attributes.Mtime.Before(m2), Equals, true)
+	attr2, _ := dir2.GetAttributes()
+	m2 := attr2.Mtime
+	t.Assert(m1.Add(2*time.Second).Before(m2), Equals, true)
 
-	// dir1's mtime should update now that we did a mkdir inside it
-	m1 = dir1.Attributes.Mtime
+	// dir1 didn't have an explicit mtime, so it should update now
+	// that we did a mkdir inside it
+	attr1, _ = dir1.GetAttributes()
+	m1 = attr1.Mtime
 	t.Assert(m1, Equals, m2)
 
 	// simulate forget inode so we will retrieve the inode again
@@ -2063,6 +2100,69 @@ func (s *GoofysTest) TestDirMTime(t *C) {
 
 	// the new time comes from S3 which only has seconds
 	// granularity
-	m2 = dir2.Attributes.Mtime
-	t.Assert(root.Attributes.Mtime.Before(m2), Equals, true)
+	attr2, _ = dir2.GetAttributes()
+	t.Assert(m2, Not(Equals), attr2.Mtime)
+	t.Assert(root.Attributes.Mtime.Add(time.Second).Before(attr2.Mtime), Equals, true)
+
+	// different dir2
+	dir2, err = s.LookUpInode(t, "dir2")
+	t.Assert(err, IsNil)
+
+	attr2, _ = dir2.GetAttributes()
+	m2 = attr2.Mtime
+
+	// this fails because we are listing dir/, which means we
+	// don't actually see the dir blob dir2/dir3/ (it's returned
+	// as common prefix), so we can't get dir3's mtime
+	if false {
+		// dir2/dir3/ exists and has mtime
+		s.readDirIntoCache(t, dir2.Id)
+		dir3, err := s.LookUpInode(t, "dir2/dir3")
+		t.Assert(err, IsNil)
+
+		attr3, _ := dir3.GetAttributes()
+		// setupDefaultEnv is before mounting
+		t.Assert(attr3.Mtime.Before(m2), Equals, true)
+	}
+
+	time.Sleep(time.Second)
+
+	params := &s3.PutObjectInput{
+		Bucket: &s.fs.bucket,
+		Key:    aws.String("dir2/newfile"),
+		Body:   bytes.NewReader([]byte("foo")),
+	}
+	_, err = s.s3.PutObject(params)
+	t.Assert(err, IsNil)
+
+	s.readDirIntoCache(t, dir2.Id)
+
+	newfile, err := dir2.LookUp("newfile")
+	t.Assert(err, IsNil)
+
+	attr2New, _ := dir2.GetAttributes()
+	// mtime should reflect that of the latest object
+	// GCS can return nano second resolution so truncate to second for compare
+	t.Assert(attr2New.Mtime.Unix(), Equals, newfile.Attributes.Mtime.Unix())
+	t.Assert(m2.Before(attr2New.Mtime), Equals, true)
+}
+
+func (s *GoofysTest) TestDirMTimeNoTTL(t *C) {
+	// enable cheap to ensure GET dir/ will come back before LIST dir/
+	s.fs.flags.Cheap = true
+
+	dir2, err := s.LookUpInode(t, "dir2")
+	t.Assert(err, IsNil)
+
+	attr2, _ := dir2.GetAttributes()
+	m2 := attr2.Mtime
+
+	// dir2/dir3/ exists and has mtime
+	s.readDirIntoCache(t, dir2.Id)
+	dir3, err := s.LookUpInode(t, "dir2/dir3")
+	t.Assert(err, IsNil)
+
+	attr3, _ := dir3.GetAttributes()
+	// setupDefaultEnv is before mounting
+	t.Assert(attr3.Mtime.Before(m2), Equals, true)
 }
