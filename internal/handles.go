@@ -1116,7 +1116,7 @@ func (parent *Inode) LookUpInodeDir(name string, c chan s3.ListObjectsOutput, er
 		Prefix:    parent.fs.key(name + "/"),
 	}
 
-	if fs.flags.RequestPayer {
+	if parent.fs.flags.RequestPayer {
 		params.RequestPayer = aws.String("requester")
 	}
 
