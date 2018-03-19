@@ -452,6 +452,10 @@ func PopulateFlags(c *cli.Context) (ret *FlagStorage) {
 		flags.UseSSE = true
 	}
 
+	if flags.RequestPayer {
+		params.RequestPayer = aws.String("requester")
+	}
+
 	return flags
 }
 

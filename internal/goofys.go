@@ -397,10 +397,6 @@ func (fs *Goofys) cleanUpOldMPU() {
 				UploadId: upload.UploadId,
 			}
 
-			if fs.flags.RequestPayer {
-				params.RequestPayer = aws.String("requester")
-			}
-			
 			resp, err := fs.s3.AbortMultipartUpload(params)
 			s3Log.Debug(resp)
 
