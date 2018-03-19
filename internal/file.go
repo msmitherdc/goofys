@@ -576,6 +576,10 @@ func (fh *FileHandle) readFile(offset int64, buf []byte) (bytesRead int, err err
 		fh.buffers = nil
 	}
 
+	if fs.flags.RequestPayer {
+		params.RequestPayer = aws.String("requester")
+	}
+
 	if !fs.flags.Cheap && fh.seqReadAmount >= uint64(READAHEAD_CHUNK) && fh.numOOORead < 3 {
 		if fh.reader != nil {
 			fh.inode.logFuse("cutover to the parallel algorithm")
