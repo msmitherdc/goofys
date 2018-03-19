@@ -1098,6 +1098,11 @@ func (parent *Inode) readDirFromCache(offset fuseops.DirOffset) (en *DirHandleEn
 
 func (parent *Inode) LookUpInodeNotDir(name string, c chan s3.HeadObjectOutput, errc chan error) {
 	params := &s3.HeadObjectInput{Bucket: &parent.fs.bucket, Key: parent.fs.key(name)}
+
+	if fs.flags.RequestPayer {
+		params.RequestPayer = aws.String("requester")
+	}
+
 	resp, err := parent.fs.s3.HeadObject(params)
 	if err != nil {
 		errc <- mapAwsError(err)
