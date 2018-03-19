@@ -159,10 +159,6 @@ func (fh *FileHandle) mpuPartNoSpawn(buf *MBuf, part int, total int64, last bool
 
 	en := &fh.etags[part-1]
 
-	if fs.flags.RequestPayer {
-		params.RequestPayer = aws.String("requester")
-	}
-
 	if !fs.gcs {
 		params := &s3.UploadPartInput{
 			Bucket:     &fs.bucket,
@@ -170,6 +166,10 @@ func (fh *FileHandle) mpuPartNoSpawn(buf *MBuf, part int, total int64, last bool
 			PartNumber: aws.Int64(int64(part)),
 			UploadId:   fh.mpuId,
 			Body:       buf,
+		}
+
+		if fs.flags.RequestPayer {
+			params.RequestPayer = aws.String("requester")
 		}
 
 		s3Log.Debug(params)
@@ -574,10 +574,6 @@ func (fh *FileHandle) readFile(offset int64, buf []byte) (bytesRead int, err err
 			b.buf.Close()
 		}
 		fh.buffers = nil
-	}
-
-	if fs.flags.RequestPayer {
-		params.RequestPayer = aws.String("requester")
 	}
 
 	if !fs.flags.Cheap && fh.seqReadAmount >= uint64(READAHEAD_CHUNK) && fh.numOOORead < 3 {
